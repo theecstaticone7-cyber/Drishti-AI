@@ -1,0 +1,38 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+venv310/
+new_env/
+shop_env/
+inference/venv/
+inference/venv310/
+inference/new_env/
+inference/shop_env/
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temporary files
+*.log
+*.tmp
+
+# Dataset
+dataset/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+inference/snapshots/
