@@ -15,9 +15,8 @@ Instead of relying entirely on continuous manual CCTV monitoring, Drishti AI ana
 - 🎯 Transformer-based object detection using DETR
 - 👥 Multi-object tracking using ByteTrack
 - 🧍 Human pose estimation using MediaPipe
-- 🧠 Spatial feature extraction using ResNet18
-- 🔄 Temporal behavior analysis using Transformer Encoder
-- ⚠️ Hybrid anomaly detection using model predictions and motion analysis
+- 🔄 Temporal behaviour modelling with a Transformer autoencoder over 24-frame skeleton windows, benchmarked against an LSTM autoencoder
+- ⚠️ Unsupervised anomaly detection trained on normal motion only, benchmarked on ShanghaiTech Campus
 - 🔔 Real-time visual anomaly alerts
 - 📦 Bounding-box based anomaly visualization
 - 🗃️ MongoDB-based anomaly storage
@@ -49,24 +48,17 @@ The tracking module uses ByteTrack to maintain identity consistency of detected 
 Working: Detected bounding boxes are passed to the tracker, which assigns unique IDs and tracks individuals across consecutive frames, even in crowded scenes.
 <img width="574" height="350" alt="image" src="https://github.com/user-attachments/assets/b13d93d6-198b-4ca5-afb8-b382ad9b50dd" />
 
-Pose Estimation(MediaPipe)
-This module performs human pose analysis using MediaPipe for understanding posture and gesture patterns. In this system, pose estimation works implicitly without displaying skeletal keypoints or pose lines on the output. 
-Major Functions Used: 
-• mp.solutions.pose.Pose() – Initializes pose model 
-• pose.process() – Processes frames to extract pose-related features 
-Working: The module internally analyzes human body movements by extracting keypoint information such as joints and limb positions. These features help in identifying actions like bending, unusual hand movements, or object concealment. Instead of visualizing pose landmarks, the extracted information is directly used to improve behavior analysis in the anomaly detection process. 
+Pose Estimation (MediaPipe)
+Each tracked person's box is padded by 10% and passed to MediaPipe Pose. The 33 MediaPipe landmarks are mapped to the 17 COCO joints (plus a neck point, 18 total) and converted back to full-frame pixel coordinates, so live poses use the same skeleton layout as the training data.
 <img width="505" height="255" alt="image" src="https://github.com/user-attachments/assets/55e70b18-fbe1-4fec-babc-8bb1867d7add" />
 
-Anomaly Detection Module (ResNet + Transformer) 
-This module identifies abnormal behavior using spatial and temporal analysis. 
-Major Functions Used: 
-• resnet_model() – Extracts spatial features 
-• transformer_encoder() – Processes temporal sequences 
-• calculate_motion_diff() – Computes motion differences 
-• threshold_check() – Classifies anomaly 
-Working: A sequence of frames is processed to extract features using ResNet18. These features are passed through a Transformer Encoder to analyze motion patterns. A hybrid approach combining transformer output and motion difference is used to detect anomalies. 
-
-<img width="485" height="277" alt="image" src="https://github.com/user-attachments/assets/4b482607-2d10-4c4e-94d5-07d0002bffe5" />
+Anomaly Detection Module (Pose Transformer Autoencoder)
+Code: `inference/pose_anomaly.py`, training: `training/train_eval_shanghaitech.py`
+• Each person keeps a sliding window of their last 24 skeletons.
+• Each window is normalised (centred on the person and scaled by body height), so position and camera distance don't matter, only body shape and motion.
+• A Transformer autoencoder trained **only on normal behaviour** tries to reconstruct the window. Self-attention across the 24 frames encodes the motion into a small latent vector (a bottleneck, so it can't just copy its input), and a second attention stack decodes it back to joint positions. An LSTM autoencoder is trained the same way for comparison. Motion it has never seen (running, fighting, throwing, falling) reconstructs badly, so the reconstruction error is the anomaly score.
+• The alert threshold is the 99th percentile of errors on held-out normal training clips, so it is calibrated on data, not hand-tuned.
+• An alert fires only after several consecutive anomalous windows (hysteresis), which cuts one-frame false alarms. The person, time and snapshot are logged to MongoDB.
 
 Alert and Visualization(Streamlit)
 This module handles real-time display and alert generation. 
@@ -77,15 +69,34 @@ Major Functions Used:
 Working: The processed video is displayed using Streamlit, highlighting anomalies with bounding boxes. Alerts are generated in real time, and results are stored for reporting. 
 <img width="638" height="309" alt="image" src="https://github.com/user-attachments/assets/e8f2b791-6dd5-4803-9065-cc993cf5ab54" />
 
+---
 
+## 📈 Evaluation on ShanghaiTech Campus
 
+The anomaly model is trained and evaluated with the standard ShanghaiTech Campus protocol: train on normal clips only, score every test frame, and report frame-level ROC-AUC. It uses the pose data, ground truth and scoring code released with STG-NF (ICCV 2023), so the numbers are directly comparable to the published result.
 
+| Method | Frame-level AUC |
+|---|---|
+| Speed heuristic (rule-based baseline) | _run notebook_ |
+| Drishti pose LSTM autoencoder | _run notebook_ |
+| **Drishti pose Transformer autoencoder (deployed)** | _run notebook_ |
+| STG-NF (ICCV 2023, published, pose-only) | 85.9 |
 
+Precision, recall, F1 and false-alarm rate at the calibrated alert threshold are in `inference/models/results.json`, and the ROC curve is in `inference/models/roc_curve.png`.
 
+### Reproduce
+Open `notebooks/train_eval_shanghaitech.ipynb` in Google Colab with a GPU runtime and run all cells (about 20 minutes). It downloads the data, trains the model, prints the table above, and downloads the checkpoints. Put them in `inference/models/`; the app loads `pose_ae_shanghaitech.pt`.
 
+## ▶️ Run the app
+```bash
+cd inference
+pip install -r requirements.txt
+# MongoDB must be running on localhost:27017 for incident history
+streamlit run app.py
+```
 
-
-
-
-
-
+## ⚠️ Limitations
+- The model is trained on AlphaPose skeletons and runs on MediaPipe skeletons at inference time. Both use the same COCO joint layout, but the keypoint detectors differ, so live accuracy may be lower than the benchmark.
+- Anomaly here means *unusual body motion* compared with ShanghaiTech's campus scenes. It does not understand objects or intent, so concealment of an item without unusual movement is not detected.
+- DETR on CPU is slow, so a GPU is needed for real-time frame rates.
+- It's a decision-support tool for a human operator, not an automatic accusation system.

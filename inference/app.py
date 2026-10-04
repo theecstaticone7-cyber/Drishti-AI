@@ -1,7 +1,6 @@
 import streamlit as st
 import torch
 import torch.nn as nn
-import torchvision.models as models
 import cv2
 import numpy as np
 from torchvision.transforms import functional as F
@@ -18,6 +17,9 @@ from mongo_db import store_anomaly, get_all_anomalies
 
 # UI
 from ui import setup_ui
+
+# Anomaly model
+from pose_anomaly import PoseAnomalyScorer, mediapipe_to_coco17_pixels
 
 confidence_threshold, video_source, start, frame_placeholder = setup_ui()
 alert_box = st.empty()
@@ -38,45 +40,37 @@ def load_model():
 
 model = load_model()
 
-class VideoTransformer(nn.Module):
-    def __init__(self):
-        super().__init__()
-        resnet = models.resnet18(pretrained=True)
-        self.backbone = nn.Sequential(*list(resnet.children())[:-1])
-        self.proj = nn.Linear(512, 256)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=256,nhead=4,batch_first=True)
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
-        self.fc = nn.Linear(256, 2)
-
-    def forward(self, x):
-        B,T,C,H,W = x.shape
-        x = x.view(B*T,C,H,W)
-        features = self.backbone(x)
-        features = features.view(B,T,512)
-        features = self.proj(features)
-        x = self.transformer(features)
-        x = x.mean(dim=1)
-        return self.fc(x)
+# Pose anomaly model: Transformer (or LSTM) autoencoder trained on ShanghaiTech normal motion
+# (see training/train_eval_shanghaitech.py and notebooks/). Reconstruction
+# error above the calibrated threshold = suspicious motion.
+ANOMALY_CKPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "pose_ae_shanghaitech.pt")
 
 @st.cache_resource
 def load_anomaly_model():
-    model = VideoTransformer()
-    model.eval()
-    return model
+    if not os.path.exists(ANOMALY_CKPT):
+        st.error(f"Anomaly model not found at {ANOMALY_CKPT}. Run notebooks/train_eval_shanghaitech.ipynb "
+                 "and put pose_ae_shanghaitech.pt in inference/models/.")
+        st.stop()
+    return PoseAnomalyScorer(ANOMALY_CKPT)
 
-anomaly_model = load_anomaly_model()
+anomaly_scorer = load_anomaly_model()
+with st.sidebar:
+    _name = anomaly_scorer.metrics.get("deployed_model")
+    _auc = anomaly_scorer.metrics.get("methods", {}).get(_name, {}).get("frame_auc")
+    if _auc:
+        st.caption(f"Anomaly model: {_name} (ShanghaiTech frame AUC {_auc*100:.1f})")
 
 tracker = sv.ByteTrack()
 
 mp_pose = mp.solutions.pose
-pose = mp_pose.Pose()
+# static_image_mode: each crop is a different person, so don't let MediaPipe track across crops
+pose = mp_pose.Pose(static_image_mode=True, model_complexity=1)
 
-frame_sequences = {}
 alert_counter = {}
 
 stored_ids = {}
 
-frame_skip = 2
+frame_skip = 1  # the pose model was trained on consecutive frames; skipping frames makes motion look faster
 frame_count = 0
 
 def save_incident(track_id):
@@ -105,6 +99,7 @@ if start and video_source is not None:
         if frame_count % frame_skip != 0:
             continue
 
+        anomaly_scorer.step()
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         tensor = F.to_tensor(rgb).unsqueeze(0)
 
@@ -152,59 +147,56 @@ if start and video_source is not None:
                 cv2.putText(frame,f"ID {track_id}",(x1,y1-10),
                             cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,0,0),2)
 
-                crop = rgb[y1:y2,x1:x2]
+                # Pose on a slightly padded crop so limbs are not cut off
+                pad_x, pad_y = int(0.1*(x2-x1)), int(0.1*(y2-y1))
+                cx1, cy1 = max(0, x1-pad_x), max(0, y1-pad_y)
+                cx2, cy2 = min(w, x2+pad_x), min(h, y2+pad_y)
+                crop = rgb[cy1:cy2, cx1:cx2]
                 if crop.size==0:
                     continue
 
-                crop = cv2.resize(crop,(112,112))
-                crop_tensor = torch.tensor(crop).permute(2,0,1).float()/255.0
+                result = pose.process(crop)
+                if not result.pose_landmarks:
+                    continue
 
-                if track_id not in frame_sequences:
-                    frame_sequences[track_id]=[]
+                kp17 = mediapipe_to_coco17_pixels(result.pose_landmarks.landmark, (cx1, cy1, cx2, cy2))
+                anomaly_score = anomaly_scorer.update(track_id, kp17)
+
+                if track_id not in alert_counter:
                     alert_counter[track_id]=0
 
-                frame_sequences[track_id].append(crop_tensor)
+                if anomaly_score is None:
+                    continue  # still filling this person's 24-frame window
 
-                if len(frame_sequences[track_id])==16:
+                # Hysteresis: need several consecutive anomalous windows before alerting
+                if anomaly_scorer.is_anomalous(anomaly_score):
+                    alert_counter[track_id]+=1
+                else:
+                    alert_counter[track_id]=max(0,alert_counter[track_id]-1)
 
-                    seq = torch.stack(frame_sequences[track_id]).unsqueeze(0)
+                cv2.putText(frame,f"score {anomaly_score/anomaly_scorer.threshold:.2f}x",(x1,y1-28),
+                            cv2.FONT_HERSHEY_SIMPLEX,0.5,(0,165,255),1)
 
-                    with torch.no_grad():
-                        output = anomaly_model(seq)
+                if alert_counter[track_id] > 3:
 
-                    prob = torch.softmax(output,dim=1)
-                    transformer_score = prob[0][1].item()
+                    alert_msg = generate_alert(track_id)
 
-                    seq_np = seq.squeeze(0).numpy()
-                    diffs = np.mean(np.abs(seq_np[1:] - seq_np[:-1]))
+                    cv2.putText(frame,"Suspicious Activity",(x1,y2+20),
+                                cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,0,255),2)
 
-                    if transformer_score>0.5 and diffs>0.08:
-                        alert_counter[track_id]+=1
-                    else:
-                        alert_counter[track_id]=max(0,alert_counter[track_id]-1)
+                    alert_box.error(f"🚨 ALERT: {alert_msg}")
 
-                    if alert_counter[track_id] > 3:
+                    save_incident(track_id)
 
-                        alert_msg = generate_alert(track_id)
+                    if track_id not in stored_ids:
 
-                        cv2.putText(frame,"🚨 Suspicious Activity",(x1,y2+20),
-                                    cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,0,255),2)
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        image_path = f"{SNAPSHOT_DIR}/person_{track_id}_{timestamp}.jpg"
+                        cv2.imwrite(image_path, frame)
 
-                        alert_box.error(f"🚨 ALERT: {alert_msg}")
+                        store_anomaly(video_source, track_id, image_path)
 
-                        save_incident(track_id)
-
-                        if track_id not in stored_ids:
-
-                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            image_path = f"{SNAPSHOT_DIR}/person_{track_id}_{timestamp}.jpg"
-                            cv2.imwrite(image_path, frame)
-
-                            store_anomaly(video_source, track_id, image_path)
-
-                            stored_ids[track_id] = True
-
-                    frame_sequences[track_id].pop(0)
+                        stored_ids[track_id] = True
 
         frame_placeholder.image(
             cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
