@@ -174,7 +174,7 @@ if start and video_source is not None:
                 else:
                     alert_counter[track_id]=max(0,alert_counter[track_id]-1)
 
-                cv2.putText(frame,f"score {anomaly_score/anomaly_scorer.threshold:.2f}x",(x1,y1-28),
+                cv2.putText(frame,f"score {anomaly_score:.1f} / {anomaly_scorer.threshold:.1f}",(x1,y1-28),
                             cv2.FONT_HERSHEY_SIMPLEX,0.5,(0,165,255),1)
 
                 if alert_counter[track_id] > 3:

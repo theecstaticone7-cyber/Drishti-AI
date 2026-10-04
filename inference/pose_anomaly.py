@@ -80,6 +80,18 @@ def normalize_segments(segs_xy):
     return (x - mean) / std_y
 
 
+def speed_score(segs_xy):
+    """
+    Rule-based motion score: average joint speed per frame, divided by body
+    size (std of y). Fast motion (running, cycling) gives high values.
+    segs_xy: (N, T, V, 2) pixel coordinates -> (N,)
+    """
+    segs_xy = np.asarray(segs_xy, dtype=np.float32)
+    height = segs_xy[..., 1].std(axis=(1, 2)) + 1e-6
+    speed = np.linalg.norm(np.diff(segs_xy, axis=1), axis=-1).mean(axis=(1, 2))
+    return speed / height
+
+
 # --------------------------------------------------------------------------
 # Model
 # --------------------------------------------------------------------------
@@ -184,9 +196,14 @@ class PoseAnomalyScorer:
         {
           "state_dict": ...,
           "config": {"arch": "lstm"|"transformer", "hidden_dim": .., "latent_dim": .., "num_layers": .., "seg_len": ..},
-          "threshold": float,   # calibrated on held-out normal data
+          "threshold": float,   # autoencoder-only threshold, calibrated on held-out normal data
+          "fusion": {"err_mean", "err_std", "speed_mean", "speed_std", "threshold"},  # optional
           "metrics": {...}      # test results, for reference
         }
+
+    If "fusion" is present, the score is z(reconstruction error) + z(speed),
+    standardised with statistics from held-out normal training clips.
+    Otherwise it is the raw reconstruction error.
     """
 
     def __init__(self, ckpt_path, device="cpu", max_missing=10):
@@ -197,7 +214,8 @@ class PoseAnomalyScorer:
         self.model = build_model(cfg).to(device)
         self.model.load_state_dict(ckpt["state_dict"])
         self.model.eval()
-        self.threshold = float(ckpt["threshold"])
+        self.fusion = ckpt.get("fusion")
+        self.threshold = float(self.fusion["threshold"] if self.fusion else ckpt["threshold"])
         self.metrics = ckpt.get("metrics", {})
         self.device = device
         self.max_missing = max_missing
@@ -223,9 +241,14 @@ class PoseAnomalyScorer:
         buf.append(coco17_to_coco18(kp17_xy))
         if len(buf) < self.seg_len:
             return None
-        seg = normalize_segments(np.stack(buf)[None])          # (1, T, 18, 2)
-        x = torch.from_numpy(seg).to(self.device)
-        return float(self.model.anomaly_score(x)[0])
+        raw = np.stack(buf)[None]                              # (1, T, 18, 2) pixels
+        x = torch.from_numpy(normalize_segments(raw)).to(self.device)
+        err = float(self.model.anomaly_score(x)[0])
+        if not self.fusion:
+            return err
+        f = self.fusion
+        spd = float(speed_score(raw)[0])
+        return (err - f["err_mean"]) / f["err_std"] + (spd - f["speed_mean"]) / f["speed_std"]
 
     def is_anomalous(self, score):
         return score is not None and score > self.threshold

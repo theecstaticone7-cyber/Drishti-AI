@@ -30,7 +30,7 @@ from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, roc_
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "inference"))
-from pose_anomaly import SEG_LEN, build_model, normalize_segments  # noqa: E402
+from pose_anomaly import SEG_LEN, build_model, normalize_segments, speed_score  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -83,9 +83,7 @@ def frame_level_eval(scoring_utils, normality, meta, seg_len):
 # --------------------------------------------------------------------------
 def speed_baseline(xy):
     """Rule-based baseline: average joint speed, scaled by body size. Fast motion = anomalous."""
-    height = xy[..., 1].std(axis=(1, 2)) + 1e-6
-    speed = np.linalg.norm(np.diff(xy, axis=1), axis=-1).mean(axis=(1, 2))
-    return speed / height
+    return speed_score(xy)
 
 
 def train_autoencoder(train_x, val_x, cfg, device, log):
@@ -139,7 +137,7 @@ def main():
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch_size", type=int, default=512)
     p.add_argument("--archs", default="lstm,transformer", help="Comma-separated models to train and compare")
-    p.add_argument("--deploy", default="transformer", help="Which trained model the app loads")
+    p.add_argument("--deploy", default="lstm", help="Which trained model (fused with speed) the app loads")
     p.add_argument("--hidden_dim", type=int, default=128)
     p.add_argument("--latent_dim", type=int, default=64)
     p.add_argument("--train_stride", type=int, default=6)
@@ -195,7 +193,27 @@ def main():
         log(f"{name}: frame-level AUC = {auc * 100:.2f}")
         return gt, scores
 
-    gt, _ = evaluate("Speed heuristic (rule-based baseline)", -speed_baseline(test_xy))
+    def operating_point(name, gt, scores, threshold):
+        """Precision/recall/F1/false alarms when alerting above a threshold fixed on normal data."""
+        anomaly_gt, anomaly_score = 1 - gt, -scores
+        pred = (anomaly_score > threshold).astype(int)
+        pr, rc, f1, _ = precision_recall_fscore_support(anomaly_gt, pred, average="binary", zero_division=0)
+        log(f"  at calibrated threshold: precision {pr:.3f} recall {rc:.3f} F1 {f1:.3f}")
+        results[name].update({
+            "threshold": threshold,
+            "threshold_rule": f"{args.threshold_pct}th percentile of held-out normal training clips",
+            "precision_at_threshold": round(float(pr), 4),
+            "recall_at_threshold": round(float(rc), 4),
+            "f1_at_threshold": round(float(f1), 4),
+            "false_alarm_rate_on_normal_frames": round(float(pred[anomaly_gt == 0].mean()), 4),
+        })
+
+    # Rule-based baseline (also one half of the fusion score)
+    val_speed, test_speed = speed_baseline(train_xy[is_val]), speed_baseline(test_xy)
+    name = "Speed heuristic (rule-based baseline)"
+    gt, scores = evaluate(name, -test_speed)
+    operating_point(name, gt, scores, float(np.percentile(val_speed, args.threshold_pct)))
+    speed_stats = (float(val_speed.mean()), float(val_speed.std() + 1e-8))
 
     for arch in archs:
         cfg = dict(arch=arch, hidden_dim=args.hidden_dim, latent_dim=args.latent_dim, seg_len=SEG_LEN,
@@ -207,14 +225,21 @@ def main():
 
         val_err = batched_scores(model, val_x, args.batch_size)
         test_err = batched_scores(model, test_x, args.batch_size)
-        threshold = float(np.percentile(val_err, args.threshold_pct))
 
+        # 1) Autoencoder alone
         name = pretty[arch]
         gt, scores = evaluate(name, -test_err)
-        anomaly_gt, anomaly_score = 1 - gt, -scores
-        pred = (anomaly_score > threshold).astype(int)
-        pr, rc, f1, _ = precision_recall_fscore_support(anomaly_gt, pred, average="binary", zero_division=0)
-        log(f"  at calibrated threshold: precision {pr:.3f} recall {rc:.3f} F1 {f1:.3f}")
+        operating_point(name, gt, scores, float(np.percentile(val_err, args.threshold_pct)))
+
+        # 2) Fusion: autoencoder error + speed, each z-scored with statistics from held-out
+        #    NORMAL training clips only, equal weights fixed in advance (nothing tuned on test).
+        err_stats = (float(val_err.mean()), float(val_err.std() + 1e-8))
+        fuse = lambda e, s: (e - err_stats[0]) / err_stats[1] + (s - speed_stats[0]) / speed_stats[1]  # noqa: E731
+        val_fused, test_fused = fuse(val_err, val_speed), fuse(test_err, test_speed)
+        fusion_threshold = float(np.percentile(val_fused, args.threshold_pct))
+        fname = f"{pretty[arch]} + speed (fusion)"
+        gt, scores = evaluate(fname, -test_fused)
+        operating_point(fname, gt, scores, fusion_threshold)
 
         # CPU latency of the anomaly model alone for one person-window (what the app pays per person)
         cpu_model = build_model(cfg)
@@ -228,25 +253,19 @@ def main():
             cpu_model.anomaly_score(one)
         cpu_ms = (time.time() - t0) / 200 * 1000
 
-        results[name].update({
-            "threshold": threshold,
-            "threshold_rule": f"{args.threshold_pct}th percentile of held-out normal training clips",
-            "precision_at_threshold": round(float(pr), 4),
-            "recall_at_threshold": round(float(rc), 4),
-            "f1_at_threshold": round(float(f1), 4),
-            "false_alarm_rate_on_normal_frames": round(float(pred[anomaly_gt == 0].mean()), 4),
-            "params": int(sum(p.numel() for p in model.parameters())),
-            "train_seconds": round(train_time, 1),
-            "cpu_ms_per_window": round(cpu_ms, 2),
-            "config": cfg,
-        })
-        trained[arch] = (cpu_model, cfg, threshold)
+        extra = {"params": int(sum(p.numel() for p in model.parameters())),
+                 "train_seconds": round(train_time, 1), "cpu_ms_per_window": round(cpu_ms, 2), "config": cfg}
+        results[name].update(extra)
+        results[fname].update(extra)
+        fusion = {"err_mean": err_stats[0], "err_std": err_stats[1],
+                  "speed_mean": speed_stats[0], "speed_std": speed_stats[1], "threshold": fusion_threshold}
+        trained[arch] = (cpu_model, cfg, float(np.percentile(val_err, args.threshold_pct)), fusion, fname)
 
     summary = {
         "dataset": "ShanghaiTech Campus (frame-level, STG-NF pose release and scoring)",
         "reference_published": {"STG-NF (ICCV 2023), pose-only": 0.859},
         "methods": results,
-        "deployed_model": pretty.get(args.deploy),
+        "deployed_model": trained[args.deploy][4] if args.deploy in trained else None,
         "data": {"train_windows": int((~is_val).sum()), "calibration_windows": int(is_val.sum()),
                  "test_windows": int(len(test_xy)), "test_frames": int(len(gt)),
                  "anomalous_frame_ratio": round(float((1 - gt).mean()), 4)},
@@ -255,10 +274,11 @@ def main():
     with open(os.path.join(args.out_dir, "results.json"), "w") as f:
         json.dump(summary, f, indent=2)
 
-    for arch, (cpu_model, cfg, threshold) in trained.items():
+    for arch, (cpu_model, cfg, threshold, fusion, fname) in trained.items():
         ckpt = {"state_dict": cpu_model.state_dict(),
                 "config": {k: cfg[k] for k in ("arch", "hidden_dim", "latent_dim", "num_layers", "seg_len")},
                 "threshold": threshold,
+                "fusion": fusion,
                 "metrics": summary}
         torch.save(ckpt, os.path.join(args.out_dir, f"pose_ae_{arch}.pt"))
         if arch == args.deploy:

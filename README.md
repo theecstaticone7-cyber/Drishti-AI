@@ -15,7 +15,7 @@ Instead of relying entirely on continuous manual CCTV monitoring, Drishti AI ana
 - 🎯 Transformer-based object detection using DETR
 - 👥 Multi-object tracking using ByteTrack
 - 🧍 Human pose estimation using MediaPipe
-- 🔄 Temporal behaviour modelling with a Transformer autoencoder over 24-frame skeleton windows, benchmarked against an LSTM autoencoder
+- 🔄 Temporal behaviour modelling with LSTM and Transformer autoencoders over 24-frame skeleton windows, fused with a motion-speed signal
 - ⚠️ Unsupervised anomaly detection trained on normal motion only, benchmarked on ShanghaiTech Campus
 - 🔔 Real-time visual anomaly alerts
 - 📦 Bounding-box based anomaly visualization
@@ -52,11 +52,13 @@ Pose Estimation (MediaPipe)
 Each tracked person's box is padded by 10% and passed to MediaPipe Pose. The 33 MediaPipe landmarks are mapped to the 17 COCO joints (plus a neck point, 18 total) and converted back to full-frame pixel coordinates, so live poses use the same skeleton layout as the training data.
 <img width="505" height="255" alt="image" src="https://github.com/user-attachments/assets/55e70b18-fbe1-4fec-babc-8bb1867d7add" />
 
-Anomaly Detection Module (Pose Transformer Autoencoder)
+Anomaly Detection Module (Pose Autoencoder + Speed Fusion)
 Code: `inference/pose_anomaly.py`, training: `training/train_eval_shanghaitech.py`
 • Each person keeps a sliding window of their last 24 skeletons.
 • Each window is normalised (centred on the person and scaled by body height), so position and camera distance don't matter, only body shape and motion.
-• A Transformer autoencoder trained **only on normal behaviour** tries to reconstruct the window. Self-attention across the 24 frames encodes the motion into a small latent vector (a bottleneck, so it can't just copy its input), and a second attention stack decodes it back to joint positions. An LSTM autoencoder is trained the same way for comparison. Motion it has never seen (running, fighting, throwing, falling) reconstructs badly, so the reconstruction error is the anomaly score.
+• An autoencoder trained **only on normal behaviour** tries to reconstruct the window. Motion it has never seen reconstructs badly, so reconstruction error flags unusual *body movement*. Two architectures are trained and compared: an LSTM autoencoder and a Transformer autoencoder (self-attention across the 24 frames, mean-pooled into a small latent bottleneck so it can't just copy its input).
+• A rule-based speed score (joint speed divided by body size) flags *fast* movement such as running or cycling.
+• The final score fuses both: each is standardised using held-out normal training clips and they are added with equal weights. Nothing is tuned on the test set.
 • The alert threshold is the 99th percentile of errors on held-out normal training clips, so it is calibrated on data, not hand-tuned.
 • An alert fires only after several consecutive anomalous windows (hysteresis), which cuts one-frame false alarms. The person, time and snapshot are logged to MongoDB.
 
@@ -77,15 +79,19 @@ The anomaly model is trained and evaluated with the standard ShanghaiTech Campus
 
 | Method | Frame-level AUC |
 |---|---|
-| Speed heuristic (rule-based baseline) | _run notebook_ |
-| Drishti pose LSTM autoencoder | _run notebook_ |
-| **Drishti pose Transformer autoencoder (deployed)** | _run notebook_ |
+| Speed heuristic (rule-based baseline) | 78.5 |
+| Drishti pose LSTM autoencoder | 77.0 |
+| Drishti pose Transformer autoencoder | 74.2 |
+| Drishti LSTM autoencoder + speed (fusion) | _run notebook_ |
+| Drishti Transformer autoencoder + speed (fusion) | _run notebook_ |
 | STG-NF (ICCV 2023, published, pose-only) | 85.9 |
+
+On their own, neither learned model beats the speed rule. Most ShanghaiTech anomalies are people cycling, running or skateboarding, so speed alone is a strong signal. The fusion rows test whether adding the learned motion model on top of speed helps.
 
 Precision, recall, F1 and false-alarm rate at the calibrated alert threshold are in `inference/models/results.json`, and the ROC curve is in `inference/models/roc_curve.png`.
 
 ### Reproduce
-Open `notebooks/train_eval_shanghaitech.ipynb` in Google Colab with a GPU runtime and run all cells (about 20 minutes). It downloads the data, trains the model, prints the table above, and downloads the checkpoints. Put them in `inference/models/`; the app loads `pose_ae_shanghaitech.pt`.
+Open `notebooks/train_eval_shanghaitech.ipynb` in Google Colab with a GPU runtime and run all cells (about 20 minutes). It downloads the data, trains the model, prints the table above, and downloads the checkpoints. Put them in `inference/models/`; the app loads `pose_ae_shanghaitech.pt` (LSTM + speed fusion by default).
 
 ## ▶️ Run the app
 ```bash
