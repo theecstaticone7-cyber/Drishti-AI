@@ -1,0 +1,118 @@
+{
+  "dataset": "ShanghaiTech Campus (frame-level, STG-NF pose release and scoring)",
+  "reference_published": {
+    "STG-NF (ICCV 2023), pose-only": 0.859
+  },
+  "methods": {
+    "Speed heuristic (rule-based baseline)": {
+      "frame_auc": 0.785,
+      "threshold": 0.4203215539455414,
+      "threshold_rule": "99.0th percentile of held-out normal training clips",
+      "precision_at_threshold": 0.815,
+      "recall_at_threshold": 0.1282,
+      "f1_at_threshold": 0.2215,
+      "false_alarm_rate_on_normal_frames": 0.0215
+    },
+    "Drishti pose LSTM autoencoder": {
+      "frame_auc": 0.7703,
+      "threshold": 0.12160040438175201,
+      "threshold_rule": "99.0th percentile of held-out normal training clips",
+      "precision_at_threshold": 0.7589,
+      "recall_at_threshold": 0.1026,
+      "f1_at_threshold": 0.1808,
+      "false_alarm_rate_on_normal_frames": 0.0241,
+      "params": 502500,
+      "train_seconds": 224.4,
+      "cpu_ms_per_window": 1.91,
+      "config": {
+        "arch": "lstm",
+        "hidden_dim": 128,
+        "latent_dim": 64,
+        "seg_len": 24,
+        "epochs": 30,
+        "batch_size": 512,
+        "seed": 0,
+        "num_layers": 2,
+        "lr": 0.001
+      }
+    },
+    "Drishti pose LSTM autoencoder + speed (fusion)": {
+      "frame_auc": 0.7906,
+      "threshold": 6.12773323059082,
+      "threshold_rule": "99.0th percentile of held-out normal training clips",
+      "precision_at_threshold": 0.7821,
+      "recall_at_threshold": 0.1083,
+      "f1_at_threshold": 0.1903,
+      "false_alarm_rate_on_normal_frames": 0.0223,
+      "params": 502500,
+      "train_seconds": 224.4,
+      "cpu_ms_per_window": 1.91,
+      "config": {
+        "arch": "lstm",
+        "hidden_dim": 128,
+        "latent_dim": 64,
+        "seg_len": 24,
+        "epochs": 30,
+        "batch_size": 512,
+        "seed": 0,
+        "num_layers": 2,
+        "lr": 0.001
+      }
+    },
+    "Drishti pose Transformer autoencoder": {
+      "frame_auc": 0.7423,
+      "threshold": 0.094277024269104,
+      "threshold_rule": "99.0th percentile of held-out normal training clips",
+      "precision_at_threshold": 0.7177,
+      "recall_at_threshold": 0.0788,
+      "f1_at_threshold": 0.142,
+      "false_alarm_rate_on_normal_frames": 0.0229,
+      "params": 1221732,
+      "train_seconds": 547.1,
+      "cpu_ms_per_window": 4.54,
+      "config": {
+        "arch": "transformer",
+        "hidden_dim": 128,
+        "latent_dim": 64,
+        "seg_len": 24,
+        "epochs": 30,
+        "batch_size": 512,
+        "seed": 0,
+        "num_layers": 3,
+        "lr": 0.0005
+      }
+    },
+    "Drishti pose Transformer autoencoder + speed (fusion)": {
+      "frame_auc": 0.778,
+      "threshold": 7.382359981536865,
+      "threshold_rule": "99.0th percentile of held-out normal training clips",
+      "precision_at_threshold": 0.7117,
+      "recall_at_threshold": 0.0781,
+      "f1_at_threshold": 0.1407,
+      "false_alarm_rate_on_normal_frames": 0.0234,
+      "params": 1221732,
+      "train_seconds": 547.1,
+      "cpu_ms_per_window": 4.54,
+      "config": {
+        "arch": "transformer",
+        "hidden_dim": 128,
+        "latent_dim": 64,
+        "seg_len": 24,
+        "epochs": 30,
+        "batch_size": 512,
+        "seed": 0,
+        "num_layers": 3,
+        "lr": 0.0005
+      }
+    }
+  },
+  "deployed_model": "Drishti pose LSTM autoencoder + speed (fusion)",
+  "data": {
+    "train_windows": 130827,
+    "calibration_windows": 14335,
+    "test_windows": 144714,
+    "test_frames": 40791,
+    "anomalous_frame_ratio": 0.4248
+  },
+  "device": "cuda"
+}

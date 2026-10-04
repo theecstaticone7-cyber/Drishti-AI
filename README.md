@@ -77,21 +77,28 @@ Working: The processed video is displayed using Streamlit, highlighting anomalie
 
 The anomaly model is trained and evaluated with the standard ShanghaiTech Campus protocol: train on normal clips only, score every test frame, and report frame-level ROC-AUC. It uses the pose data, ground truth and scoring code released with STG-NF (ICCV 2023), so the numbers are directly comparable to the published result.
 
-| Method | Frame-level AUC |
-|---|---|
-| Speed heuristic (rule-based baseline) | 78.5 |
-| Drishti pose LSTM autoencoder | 77.0 |
-| Drishti pose Transformer autoencoder | 74.2 |
-| Drishti LSTM autoencoder + speed (fusion) | _run notebook_ |
-| Drishti Transformer autoencoder + speed (fusion) | _run notebook_ |
-| STG-NF (ICCV 2023, published, pose-only) | 85.9 |
+| Method | Frame-level AUC | Precision* | Recall* | False alarms* |
+|---|---|---|---|---|
+| Speed heuristic (rule-based baseline) | 78.5 | 0.82 | 0.13 | 2.2% |
+| LSTM autoencoder | 77.0 | 0.76 | 0.10 | 2.4% |
+| Transformer autoencoder | 74.2 | 0.72 | 0.08 | 2.3% |
+| **LSTM autoencoder + speed (fusion, deployed)** | **79.1** | 0.78 | 0.11 | 2.2% |
+| Transformer autoencoder + speed (fusion) | 77.8 | 0.71 | 0.08 | 2.3% |
+| STG-NF (ICCV 2023, published, pose-only) | 85.9 | – | – | – |
 
-On their own, neither learned model beats the speed rule. Most ShanghaiTech anomalies are people cycling, running or skateboarding, so speed alone is a strong signal. The fusion rows test whether adding the learned motion model on top of speed helps.
+\* At the alert threshold (99th percentile of scores on held-out normal training clips). Test set: 40,791 frames, 42% anomalous.
+
+**What the numbers say:**
+- On its own, neither learned model beats the simple speed rule. Most ShanghaiTech anomalies are people cycling, running or skateboarding, so speed alone is a strong signal.
+- Fusing the LSTM autoencoder with speed gives the best AUC (79.1, +0.6 over speed alone), so the autoencoder adds a small amount of information that speed misses. This is from one training run, so treat the gain as modest.
+- The LSTM beat the Transformer on every metric while being 2.4× smaller and about 2× faster on CPU (1.9 vs 4.5 ms per person-window). With 24-frame windows and roughly 130k training windows, self-attention brought no advantage here.
+- At the strict alert threshold, the system catches about 11% of anomalous frames with about 2% false alarms on normal frames. It's tuned to avoid crying wolf, and a lower threshold trades more catches for more false alarms.
+- STG-NF's normalizing-flow model is still about 7 AUC points ahead.
 
 Precision, recall, F1 and false-alarm rate at the calibrated alert threshold are in `inference/models/results.json`, and the ROC curve is in `inference/models/roc_curve.png`.
 
 ### Reproduce
-Open `notebooks/train_eval_shanghaitech.ipynb` in Google Colab with a GPU runtime and run all cells (about 20 minutes). It downloads the data, trains the model, prints the table above, and downloads the checkpoints. Put them in `inference/models/`; the app loads `pose_ae_shanghaitech.pt` (LSTM + speed fusion by default).
+Open `notebooks/train_eval_shanghaitech.ipynb` in Google Colab with a GPU runtime and run all cells (about 30 minutes). It downloads the data, trains the model, prints the table above, and downloads the checkpoints. Put them in `inference/models/`; the app loads `pose_ae_shanghaitech.pt` (LSTM + speed fusion by default).
 
 ## ▶️ Run the app
 ```bash
